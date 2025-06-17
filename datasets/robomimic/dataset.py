@@ -1,4 +1,5 @@
 import copy
+
 import h5py
 import numpy as np
 import torch
@@ -7,8 +8,8 @@ from tqdm import tqdm
 
 from datasets.utils.buffer import CompressedTrajectoryBuffer
 from datasets.utils.file_utils import glob_all
-from datasets.utils.sampler import TrajectorySampler
 from datasets.utils.obs_utils import unflatten_obs
+from datasets.utils.sampler import TrajectorySampler
 
 
 class RobomimicDataset(Dataset):

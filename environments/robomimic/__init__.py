@@ -1,6 +1,7 @@
+import glob
 import os
 
-from .wrappers import RoboMimicEnvWrapper, LIBEROEnvWrapper
+from .wrappers import LIBEROEnvWrapper, RoboMimicEnvWrapper
 
 
 def make_robomimic_env(
@@ -12,7 +13,7 @@ def make_robomimic_env(
     record=False,
 ):
     if "robomimic" in dataset_name:
-        from robomimic.utils.env_utils import get_env_type, get_env_class
+        from robomimic.utils.env_utils import get_env_class, get_env_type
         from robomimic.utils.file_utils import (
             get_env_metadata_from_dataset,
             get_shape_metadata_from_dataset,
@@ -56,8 +57,8 @@ def make_robomimic_env(
             env, all_obs_keys, obs_horizon, max_episode_length, record=record
         )
     elif "libero" in dataset_name:
-        from libero.libero.envs import OffScreenRenderEnv
         from libero.libero import get_libero_path
+        from libero.libero.envs import OffScreenRenderEnv
 
         # Construct environment kwargs
         bddl_file_name = os.path.join(
@@ -65,6 +66,14 @@ def make_robomimic_env(
             "libero_10",
             dataset_path.split("/")[-1].replace("_demo.hdf5", ".bddl"),
         )
+        
+        # bddl_path = "/scr/matthewh6/LIBERO/libero/libero/bddl_files/libero_10"
+        # bddl_file_names = glob.glob(f"{bddl_path}/*.bddl")
+
+        # Create all 10 LIBERO-10 environments
+        envs = []
+
+        # for bddl_file_name in bddl_file_names:
         env_kwargs = {
             "bddl_file_name": bddl_file_name,
             "camera_heights": 128,
@@ -83,6 +92,10 @@ def make_robomimic_env(
         env = LIBEROEnvWrapper(
             env, obs_keys, obs_horizon, max_episode_length, record=record
         )
+
+        #     envs.append(env)
+
+        # return envs
     else:
         raise NotImplementedError(f"Unsupported environment: {dataset_name}")
     return env

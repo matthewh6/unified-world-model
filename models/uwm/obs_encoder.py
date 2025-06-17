@@ -5,7 +5,7 @@ import torch.nn as nn
 from einops import rearrange
 
 from models.common.language import CLIPTextEncoder
-from models.common.transforms import VideoTransform, VAEDownsample
+from models.common.transforms import VAEDownsample, VideoTransform
 from models.common.vision import ResNetImageEncoder, ViTImageEncoder
 
 

@@ -1,6 +1,6 @@
 hydra:
   run:
-    dir: /home/ubuntu/efs/chuning/logdir/${algo}/${dataset.name}/${exp_id}/${seed}
+    dir: /tmp/matthewh6/uwm/logdir/${algo}/${dataset.name}/${exp_id}/${seed}
 
 algo: ${hydra:runtime.choices.model}
 exp_id: default

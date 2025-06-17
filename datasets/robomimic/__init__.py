@@ -2,6 +2,7 @@ import os
 from typing import Union
 
 import torch.distributed as dist
+
 from .dataset import RobomimicDataset
 
 
@@ -15,6 +16,7 @@ def make_robomimic_dataset(
     subsample_ratio: float = 1.0,
     flip_rgb: bool = False,
 ):
+
     # Cache compressed dataset in the main process
     if not os.path.exists(buffer_path):
         if not dist.is_initialized() or dist.get_rank() == 0:

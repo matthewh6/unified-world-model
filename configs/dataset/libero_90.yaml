@@ -3,5 +3,5 @@ defaults:
   - _self_
 
 name: libero_90
-hdf5_path_globs: /home/ubuntu/LIBERO/libero/datasets/libero_90/*.hdf5
-buffer_path: /home/ubuntu/LIBERO/libero/datasets/libero_90/buffer.zarr
+hdf5_path_globs: /scr/matthewh6/LIBERO/libero/datasets/libero_90/*.hdf5
+buffer_path: /scr/matthewh6/LIBERO/libero/datasets/libero_90/buffer.zarr

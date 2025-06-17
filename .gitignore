@@ -35,3 +35,5 @@ MANIFEST
 logdir/
 wandb/
 logs/
+
+*ipynb

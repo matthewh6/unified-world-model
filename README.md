@@ -33,14 +33,14 @@ export PYTHONPATH=.
 
 To run a Robomimic single-task experiment, install the [robomimic](https://github.com/ARISE-Initiative/robomimic) dataset. Then, update the hdf5 and buffer paths in the config file (e.g. `robomimic_cap_ph.yaml`) and run
 ```
-python experiments/uwm/train_robomimic.py --config_name train_uwm_robomimic.yaml dataset=robomimic_can_ph exp_id=singletask
+python experiments/uwm/train_robomimic.py --config-name train_uwm_robomimic.yaml dataset=robomimic_can_ph exp_id=singletask
 ```
 Note that this will create a Zarr compressed buffer at the `buffer_path` specified in the config file.
 
 ## LIBERO Pretraining / Finetuning Experiments
 The LIBERO experiments share most infrastructure with the Robomimic experiments. To run LIBERO pretraining and finetuning experiments, install the [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) dataset. For pretraining, update the hdf5 and buffer paths in `configs/dataset/libero_90.yaml` and run 
 ```
-python experiments/uwm/train_robomimic.py --config_name train_uwm_robomimic.yaml dataset=libero_90 exp_id=pretrain
+python experiments/uwm/train_robomimic.py --config-name train_uwm_robomimic.yaml dataset=libero_90 exp_id=pretrain
 ```
 This will pretrain a UWM on the LIBERO-90 dataset. To finetune this model on a downstream task (e.g., Book-Caddy), update the hdf5 and buffer paths in `configs/dataset/libero_book_caddy.yaml` and run
 ```

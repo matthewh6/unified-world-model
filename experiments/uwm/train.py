@@ -6,7 +6,6 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.nn.functional as F
-import wandb
 from diffusers.optimization import get_scheduler
 from einops import rearrange
 from hydra.utils import instantiate
@@ -15,8 +14,9 @@ from torch.nn.parallel import DistributedDataParallel
 from torchvision.utils import make_grid
 from tqdm import tqdm
 
+import wandb
 from datasets.utils.loader import make_distributed_data_loader
-from experiments.utils import set_seed, init_wandb, init_distributed, is_main_process
+from experiments.utils import init_distributed, init_wandb, is_main_process, set_seed
 
 
 def process_batch(batch, obs_horizon, action_horizon, device):
@@ -30,7 +30,8 @@ def process_batch(batch, obs_horizon, action_horizon, device):
     if "input_ids" in batch and "attention_mask" in batch:
         curr_obs["input_ids"] = batch["input_ids"].to(device)
         curr_obs["attention_mask"] = batch["attention_mask"].to(device)
-    return curr_obs, next_obs, actions
+    # return curr_obs, next_obs, actions
+    return curr_obs, actions
 
 
 def eval_one_epoch(config, data_loader, device, model, action_normalizer=None):
@@ -51,26 +52,39 @@ def eval_one_epoch(config, data_loader, device, model, action_normalizer=None):
         images_grid = make_grid(images, nrows)
         return images_grid
 
+    # stats = {
+    #     "loss": 0,
+    #     "action_loss": 0,
+    #     "dynamics_loss": 0,
+    #     "action_mse_marginal": 0,
+    #     "action_mse_joint": 0,
+    #     "action_mse_inv": 0,
+    #     "image_mse_marginal": 0,
+    #     "image_mse_joint": 0,
+    #     "image_mse_forward": 0,
+    # }
     stats = {
         "loss": 0,
         "action_loss": 0,
-        "dynamics_loss": 0,
+        "obs_loss": 0,
         "action_mse_marginal": 0,
+        "action_mse_conditional": 0,
         "action_mse_joint": 0,
-        "action_mse_inv": 0,
-        "image_mse_marginal": 0,
         "image_mse_joint": 0,
-        "image_mse_forward": 0,
     }
     for batch in tqdm(data_loader, desc="Evaluating", disable=not is_main_process()):
         # ------------ Preprocess data ------------ #
-        curr_obs_dict, next_obs_dict, action_norm = process_batch(
+        # curr_obs_dict, next_obs_dict, action_norm = process_batch(
+        #     batch, config.model.obs_encoder.num_frames, config.model.action_len, device
+        # )
+        curr_obs_dict, action_norm = process_batch(
             batch, config.model.obs_encoder.num_frames, config.model.action_len, device
         )
 
         with torch.no_grad():
             # ------------ Validation loss ------------ #
-            _, info = model(curr_obs_dict, next_obs_dict, action_norm)
+            # _, info = model(curr_obs_dict, next_obs_dict, action_norm)
+            _, info = model(curr_obs_dict, action_norm)
             for k, v in info.items():
                 stats[k] += v
 
@@ -78,37 +92,43 @@ def eval_one_epoch(config, data_loader, device, model, action_normalizer=None):
             action = unnormalize(action_norm)
 
             # Sample actions from marginal distribution
-            action_hat_marg = model.sample_marginal_action(curr_obs_dict)
+            action_hat_marg = model.sample_marginal_action(curr_obs_dict)  # p(a)
             marg_mse = F.mse_loss(unnormalize(action_hat_marg), action)
             dist.all_reduce(marg_mse, op=dist.ReduceOp.AVG)
             stats["action_mse_marginal"] += marg_mse
 
             # Sample actions from inverse dynamics
-            action_hat_inv = model.sample_inverse_dynamics(curr_obs_dict, next_obs_dict)
-            inv_mse = F.mse_loss(unnormalize(action_hat_inv), action)
-            dist.all_reduce(inv_mse, op=dist.ReduceOp.AVG)
-            stats["action_mse_inv"] += inv_mse
+            # action_hat_inv = model.sample_inverse_dynamics(curr_obs_dict, next_obs_dict)
+            # inv_mse = F.mse_loss(unnormalize(action_hat_inv), action)
+            # dist.all_reduce(inv_mse, op=dist.ReduceOp.AVG)
+            # stats["action_mse_inv"] += inv_mse
 
-            # Encode next observations
-            next_obs = model.obs_encoder.encode_next_obs(next_obs_dict)
+            # Encode observations
+            obs = model.obs_encoder.encode_next_obs(curr_obs_dict)
 
             # Sample observations from marginal distribution
-            next_obs_hat_marg = model.sample_marginal_next_obs(curr_obs_dict)
-            marg_mse = F.mse_loss(next_obs_hat_marg, next_obs)
-            dist.all_reduce(marg_mse, op=dist.ReduceOp.AVG)
-            stats["image_mse_marginal"] += marg_mse
+            # next_obs_hat_marg = model.sample_marginal_next_obs(curr_obs_dict)
+            # marg_mse = F.mse_loss(next_obs_hat_marg, next_obs)
+            # dist.all_reduce(marg_mse, op=dist.ReduceOp.AVG)
+            # stats["image_mse_marginal"] += marg_mse
 
             # Sample observations from forward dynamics
-            next_obs_hat_forward = model.sample_forward_dynamics(
-                curr_obs_dict, action_norm
-            )
-            forward_mse = F.mse_loss(next_obs_hat_forward, next_obs)
-            dist.all_reduce(forward_mse, op=dist.ReduceOp.AVG)
-            stats["image_mse_forward"] += forward_mse
+            # next_obs_hat_forward = model.sample_forward_dynamics(
+            #     curr_obs_dict, action_norm
+            # )
+            # forward_mse = F.mse_loss(next_obs_hat_forward, next_obs)
+            # dist.all_reduce(forward_mse, op=dist.ReduceOp.AVG)
+            # stats["image_mse_forward"] += forward_mse
+
+            # Sample conditional action
+            action_hat_cond = model.sample_conditional_action(curr_obs_dict)  # p(a | o)
+            action_cond_mse = F.mse_loss(unnormalize(action_hat_cond), action)
+            dist.all_reduce(action_cond_mse, op=dist.ReduceOp.AVG)
+            stats["action_mse_conditional"] = action_cond_mse
 
             # Sample next obs and actions from joint distribution
-            next_obs_hat_joint, action_hat_joint = model.sample_joint(curr_obs_dict)
-            joint_image_mse = F.mse_loss(next_obs_hat_joint, next_obs)
+            obs_hat_joint, action_hat_joint = model.sample_joint(curr_obs_dict)
+            joint_image_mse = F.mse_loss(obs_hat_joint, obs)
             dist.all_reduce(joint_image_mse, op=dist.ReduceOp.AVG)
             stats["image_mse_joint"] += joint_image_mse
             joint_action_mse = F.mse_loss(unnormalize(action_hat_joint), action)
@@ -119,10 +139,10 @@ def eval_one_epoch(config, data_loader, device, model, action_normalizer=None):
     stats = {k: v / len(data_loader) for k, v in stats.items()}
 
     # Plot reconstruction
-    stats["images"] = wandb.Image(decode_and_plot(next_obs[0:1]))
-    stats["images_marginal"] = wandb.Image(decode_and_plot(next_obs_hat_marg[0:1]))
-    stats["images_joint"] = wandb.Image(decode_and_plot(next_obs_hat_joint[0:1]))
-    stats["images_forward"] = wandb.Image(decode_and_plot(next_obs_hat_forward[0:1]))
+    # stats["images"] = wandb.Image(decode_and_plot(next_obs[0:1]))
+    # stats["images_marginal"] = wandb.Image(decode_and_plot(next_obs_hat_marg[0:1]))
+    # stats["images_joint"] = wandb.Image(decode_and_plot(next_obs_hat_joint[0:1]))
+    # stats["images_forward"] = wandb.Image(decode_and_plot(next_obs_hat_forward[0:1]))
     return stats
 
 
@@ -130,7 +150,7 @@ def train_one_step(config, model, optimizer, scheduler, scaler, batch, device):
     model.train()
 
     # --- Preprocess data ---
-    curr_obs, next_obs, action = process_batch(
+    curr_obs, action = process_batch(
         batch, config.model.obs_encoder.num_frames, config.model.action_len, device
     )
 
@@ -139,7 +159,8 @@ def train_one_step(config, model, optimizer, scheduler, scaler, batch, device):
     with torch.autocast(
         device_type="cuda", dtype=torch.bfloat16, enabled=config.use_amp
     ):
-        loss, info = model(curr_obs, next_obs, action, batch.get("action_mask", None))
+        # loss, info = model(curr_obs, next_obs, action, batch.get("action_mask", None))
+        loss, info = model(curr_obs, action, batch.get("action_mask", None))
 
     # Step optimizer
     optimizer.zero_grad()

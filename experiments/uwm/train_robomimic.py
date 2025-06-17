@@ -2,21 +2,21 @@ import hydra
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import wandb
 from diffusers.optimization import get_scheduler
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel
-from tqdm import trange, tqdm
+from tqdm import tqdm, trange
 
+import wandb
 from datasets.utils.loader import make_distributed_data_loader
 from environments.robomimic import make_robomimic_env
-from experiments.utils import set_seed, init_wandb, init_distributed, is_main_process
+from experiments.utils import init_distributed, init_wandb, is_main_process, set_seed
 from experiments.uwm.train import (
-    train_one_step,
-    maybe_resume_checkpoint,
     maybe_evaluate,
+    maybe_resume_checkpoint,
     maybe_save_checkpoint,
+    train_one_step,
 )
 
 
@@ -175,6 +175,9 @@ def main(config):
     # Spawn processes
     world_size = torch.cuda.device_count()
     mp.spawn(train, args=(world_size, config), nprocs=world_size, join=True)
+
+    train(rank=0, world_size=1, config=config)
+
 
 
 if __name__ == "__main__":
