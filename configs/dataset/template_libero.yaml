@@ -3,6 +3,8 @@ name: libero_book_caddy
 hdf5_path_globs: /home/ubuntu/LIBERO/libero/datasets/libero_10/STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy_demo.hdf5
 buffer_path: /home/ubuntu/LIBERO/libero/datasets/libero_10/STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy_demo.zarr
 shape_meta:
+  robot_states:
+    shape: [9] # gripper + pos + quaternion
   obs:
     agentview_rgb: &camera_meta
       shape: [128, 128, 3]
@@ -10,6 +12,8 @@ shape_meta:
     eye_in_hand_rgb: *camera_meta
   action:
     shape: [7] # pos + quarternion + gripper
+  task_emb:
+    shape: [512] # CLIP
 seq_len: ${num_frames}
 val_ratio: 0.05
 subsample_ratio: 1.0

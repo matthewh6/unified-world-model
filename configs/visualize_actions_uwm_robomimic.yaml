@@ -10,4 +10,5 @@ model:
 model_path: "/tmp/matthewh6/uwm/logdir/uwm/libero_90/pretrain/0/models.pt"
 libero_10_data_dir: "/scr/matthewh6/LIBERO/libero/datasets/libero_10"
 
-model_calls: 3
+model_calls: 3 # how many forward passes, output action will be seq_len * model_calls
+num_samples: 5

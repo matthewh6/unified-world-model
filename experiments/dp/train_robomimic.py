@@ -1,24 +1,22 @@
 import hydra
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
-import torch.nn.functional as F
-import wandb
 from diffusers.optimization import get_scheduler
-from omegaconf import OmegaConf
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel
-from tqdm import trange, tqdm
+from tqdm import tqdm, trange
 
+import wandb
 from datasets.utils.loader import make_distributed_data_loader
 from environments.robomimic import make_robomimic_env
 from experiments.dp.train import (
-    train_one_step,
-    maybe_resume_checkpoint,
     maybe_evaluate,
+    maybe_resume_checkpoint,
     maybe_save_checkpoint,
+    train_one_step,
 )
-from experiments.utils import set_seed, init_wandb, init_distributed, is_main_process
+from experiments.utils import is_main_process, set_seed
 
 
 def collect_rollout(config, model, device):
@@ -91,12 +89,14 @@ def train(rank, world_size, config):
     set_seed(config.seed * world_size + rank)
 
     # Initialize distributed training
-    init_distributed(rank, world_size)
-    device = torch.device(f"cuda:{rank}")
+    # init_distributed(rank, world_size)
+    # device = torch.device(f"cuda:{rank}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Initialize WANDB
-    if is_main_process():
-        init_wandb(config, job_type="train")
+    # if is_main_process():
+    #     init_wandb(config, job_type="train")
 
     # Create dataset
     train_set, val_set = instantiate(config.dataset)
@@ -175,7 +175,8 @@ def main(config):
     OmegaConf.resolve(config)
     # Spawn processes
     world_size = torch.cuda.device_count()
-    mp.spawn(train, args=(world_size, config), nprocs=world_size, join=True)
+    # mp.spawn(train, args=(world_size, config), nprocs=world_size, join=True)
+    train(0, world_size, config)
 
 
 if __name__ == "__main__":

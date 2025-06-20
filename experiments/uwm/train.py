@@ -24,15 +24,18 @@ def process_batch(batch, obs_horizon, action_horizon, device):
     action_end = action_start + action_horizon
     curr_obs = {k: v[:, : action_start + 1].to(device) for k, v in batch["obs"].items()}
     next_obs = {k: v[:, action_end:].to(device) for k, v in batch["obs"].items()}
-    actions = batch["action"][:, action_start:action_end].to(device)
+    state = batch["robot_states"][:, : action_start + 1].to(device)
+    action = batch["action"][:, action_start:action_end].to(device)
 
     # Add language tokens
     if "input_ids" in batch and "attention_mask" in batch:
         curr_obs["input_ids"] = batch["input_ids"].to(device)
         curr_obs["attention_mask"] = batch["attention_mask"].to(device)
     # return curr_obs, next_obs, actions
-    return curr_obs, actions
-
+    task = batch["task_emb"][:, 0:1].to(device) # B x 1 x D
+    
+    return curr_obs, state, action, task
+    
 
 def eval_one_epoch(config, data_loader, device, model, action_normalizer=None):
     model.eval()
@@ -67,73 +70,72 @@ def eval_one_epoch(config, data_loader, device, model, action_normalizer=None):
         "loss": 0,
         "action_loss": 0,
         "obs_loss": 0,
+        "task_loss": 0,
         "action_mse_marginal": 0,
+        "action_mse_obs_conditional": 0,
+        "action_mse_task_conditional": 0,
         "action_mse_conditional": 0,
-        "action_mse_joint": 0,
         "image_mse_joint": 0,
+        "action_mse_joint": 0,
+        "task_mse_joint": 0,
     }
     for batch in tqdm(data_loader, desc="Evaluating", disable=not is_main_process()):
         # ------------ Preprocess data ------------ #
         # curr_obs_dict, next_obs_dict, action_norm = process_batch(
         #     batch, config.model.obs_encoder.num_frames, config.model.action_len, device
         # )
-        curr_obs_dict, action_norm = process_batch(
+        curr_obs_dict, state, action_norm, task = process_batch(
             batch, config.model.obs_encoder.num_frames, config.model.action_len, device
         )
 
         with torch.no_grad():
             # ------------ Validation loss ------------ #
             # _, info = model(curr_obs_dict, next_obs_dict, action_norm)
-            _, info = model(curr_obs_dict, action_norm)
+            _, info = model(state, curr_obs_dict, action_norm, task)
             for k, v in info.items():
                 stats[k] += v
 
             # ------------ UWM Inference ------------ #
             action = unnormalize(action_norm)
-
+            
             # Sample actions from marginal distribution
-            action_hat_marg = model.sample_marginal_action(curr_obs_dict)  # p(a)
+            action_hat_marg = model.sample_marginal_action(state)  # p(a | s)
             marg_mse = F.mse_loss(unnormalize(action_hat_marg), action)
             dist.all_reduce(marg_mse, op=dist.ReduceOp.AVG)
             stats["action_mse_marginal"] += marg_mse
 
-            # Sample actions from inverse dynamics
-            # action_hat_inv = model.sample_inverse_dynamics(curr_obs_dict, next_obs_dict)
-            # inv_mse = F.mse_loss(unnormalize(action_hat_inv), action)
-            # dist.all_reduce(inv_mse, op=dist.ReduceOp.AVG)
-            # stats["action_mse_inv"] += inv_mse
+            # Sample actions from obs conditioned distribution
+            action_hat_obs_cond = model.sample_obs_conditioned_action(state, curr_obs_dict)  # p(a | s, o)
+            obs_cond_mse = F.mse_loss(unnormalize(action_hat_obs_cond), action)
+            dist.all_reduce(obs_cond_mse, op=dist.ReduceOp.AVG)
+            stats["action_mse_obs_conditional"] += obs_cond_mse
 
-            # Encode observations
-            obs = model.obs_encoder.encode_next_obs(curr_obs_dict)
-
-            # Sample observations from marginal distribution
-            # next_obs_hat_marg = model.sample_marginal_next_obs(curr_obs_dict)
-            # marg_mse = F.mse_loss(next_obs_hat_marg, next_obs)
-            # dist.all_reduce(marg_mse, op=dist.ReduceOp.AVG)
-            # stats["image_mse_marginal"] += marg_mse
-
-            # Sample observations from forward dynamics
-            # next_obs_hat_forward = model.sample_forward_dynamics(
-            #     curr_obs_dict, action_norm
-            # )
-            # forward_mse = F.mse_loss(next_obs_hat_forward, next_obs)
-            # dist.all_reduce(forward_mse, op=dist.ReduceOp.AVG)
-            # stats["image_mse_forward"] += forward_mse
+            # Sample actions from task conditioned distribution
+            action_hat_task_cond = model.sample_task_conditioned_action(state, task)  # p(a | s, l)
+            task_cond_mse = F.mse_loss(unnormalize(action_hat_task_cond), action)
+            dist.all_reduce(task_cond_mse, op=dist.ReduceOp.AVG)
+            stats["action_mse_task_conditional"] = task_cond_mse
 
             # Sample conditional action
-            action_hat_cond = model.sample_conditional_action(curr_obs_dict)  # p(a | o)
+            action_hat_cond = model.sample_policy(state, curr_obs_dict, task)  # p(a | s, o, l)
             action_cond_mse = F.mse_loss(unnormalize(action_hat_cond), action)
             dist.all_reduce(action_cond_mse, op=dist.ReduceOp.AVG)
             stats["action_mse_conditional"] = action_cond_mse
 
-            # Sample next obs and actions from joint distribution
-            obs_hat_joint, action_hat_joint = model.sample_joint(curr_obs_dict)
+            # Encode ground truth observations
+            obs = model.obs_encoder.encode_next_obs(curr_obs_dict)
+
+            # Sample obs, actions, and task from joint distribution
+            obs_hat_joint, action_hat_joint, task_hat_joint = model.sample_joint(state)
             joint_image_mse = F.mse_loss(obs_hat_joint, obs)
             dist.all_reduce(joint_image_mse, op=dist.ReduceOp.AVG)
             stats["image_mse_joint"] += joint_image_mse
             joint_action_mse = F.mse_loss(unnormalize(action_hat_joint), action)
             dist.all_reduce(joint_action_mse, op=dist.ReduceOp.AVG)
             stats["action_mse_joint"] += joint_action_mse
+            task_mse = F.mse_loss(task_hat_joint, task)
+            dist.all_reduce(task_mse, op=dist.ReduceOp.AVG)
+            stats["task_mse_joint"] += task_mse
 
     # Average over all batches
     stats = {k: v / len(data_loader) for k, v in stats.items()}
@@ -150,7 +152,7 @@ def train_one_step(config, model, optimizer, scheduler, scaler, batch, device):
     model.train()
 
     # --- Preprocess data ---
-    curr_obs, action = process_batch(
+    curr_obs, state, action, task = process_batch(
         batch, config.model.obs_encoder.num_frames, config.model.action_len, device
     )
 
@@ -160,7 +162,7 @@ def train_one_step(config, model, optimizer, scheduler, scaler, batch, device):
         device_type="cuda", dtype=torch.bfloat16, enabled=config.use_amp
     ):
         # loss, info = model(curr_obs, next_obs, action, batch.get("action_mask", None))
-        loss, info = model(curr_obs, action, batch.get("action_mask", None))
+        loss, info = model(state, curr_obs, action, task, batch.get("action_mask", None))
 
     # Step optimizer
     optimizer.zero_grad()

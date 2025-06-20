@@ -5,14 +5,14 @@ import torch.multiprocessing as mp
 from diffusers.optimization import get_scheduler
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
-from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm, trange
 
 import wandb
 from datasets.utils.loader import make_distributed_data_loader
 from environments.robomimic import make_robomimic_env
-from experiments.utils import init_distributed, init_wandb, is_main_process, set_seed
+from experiments.utils import is_main_process, set_seed
 from experiments.uwm.train import (
+    init_distributed,
     maybe_evaluate,
     maybe_resume_checkpoint,
     maybe_save_checkpoint,
@@ -81,7 +81,7 @@ def maybe_collect_rollout(config, step, model, device):
                 "rollout/success_rate": success_rate,
                 "rollout/video": wandb.Video(video, fps=10),
             }
-        )
+        ) if wandb.run else None
     dist.barrier()
 
 
@@ -93,9 +93,11 @@ def train(rank, world_size, config):
     init_distributed(rank, world_size)
     device = torch.device(f"cuda:{rank}")
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # Initialize WANDB
-    if is_main_process():
-        init_wandb(config, job_type="train")
+    # if is_main_process():
+    #     init_wandb(config, job_type="train")
 
     # Create dataset and loader
     train_set, val_set = instantiate(config.dataset)
@@ -122,7 +124,7 @@ def train(rank, world_size, config):
     epoch = step // len(train_loader)
 
     # Wrap model with DDP
-    model = DistributedDataParallel(model, device_ids=[rank], static_graph=True)
+    # model = DistributedDataParallel(model, device_ids=[rank], static_graph=True)
 
     # Training loop
     pbar = tqdm(
@@ -145,7 +147,7 @@ def train(rank, world_size, config):
             # --- Logging ---
             if is_main_process():
                 pbar.set_description(f"step: {step}, loss: {loss.item():.4f}")
-                wandb.log({f"train/{k}": v for k, v in info.items()})
+                wandb.log({f"train/{k}": v for k, v in info.items()}) if wandb.run else None
 
             # --- Evaluate if needed ---
             maybe_evaluate(config, step, model, val_loader, device)
@@ -176,7 +178,7 @@ def main(config):
     world_size = torch.cuda.device_count()
     mp.spawn(train, args=(world_size, config), nprocs=world_size, join=True)
 
-    train(rank=0, world_size=1, config=config)
+    # train(rank=0, world_size=1, config=config)
 
 
 

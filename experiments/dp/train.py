@@ -2,19 +2,19 @@ import os
 
 import hydra
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import torch.nn as nn
 import torch.nn.functional as F
-import wandb
 from diffusers.optimization import get_scheduler
-from omegaconf import OmegaConf
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
+import wandb
 from datasets.utils.loader import make_distributed_data_loader
-from experiments.utils import set_seed, init_wandb, init_distributed, is_main_process
+from experiments.utils import init_distributed, init_wandb, is_main_process, set_seed
 
 
 def process_batch(batch, obs_horizon, action_horizon, device):
@@ -28,7 +28,9 @@ def process_batch(batch, obs_horizon, action_horizon, device):
     if "input_ids" in batch and "attention_mask" in batch:
         obs["input_ids"] = batch["input_ids"].to(device)
         obs["attention_mask"] = batch["attention_mask"].to(device)
-    return obs, action
+
+
+    return obs, action, task
 
 
 def eval_one_epoch(config, data_loader, device, model, action_normalizer=None):
@@ -46,13 +48,13 @@ def eval_one_epoch(config, data_loader, device, model, action_normalizer=None):
     stats = {"loss": 0, "action_mse": 0}
     for batch in tqdm(data_loader, desc="Evaluating", disable=not is_main_process()):
         # ------------ Preprocess data ------------ #
-        obs, action = process_batch(
+        obs, action, task = process_batch(
             batch, config.model.obs_encoder.num_frames, config.model.action_len, device
         )
 
         with torch.no_grad():
             # ------------ Validation loss ------------ #
-            loss = model(obs, action)
+            loss = model(obs, action, task)
             dist.all_reduce(loss, op=dist.ReduceOp.AVG)
             stats["loss"] += loss.item()
 
@@ -80,7 +82,7 @@ def train_one_step(config, model, optimizer, scheduler, scaler, batch, device):
     model.train()
 
     # --- Preprocess data ---
-    obs, action = process_batch(
+    obs, action, task = process_batch(
         batch, config.model.obs_encoder.num_frames, config.model.action_len, device
     )
 
@@ -89,7 +91,7 @@ def train_one_step(config, model, optimizer, scheduler, scaler, batch, device):
     with torch.autocast(
         device_type="cuda", dtype=torch.bfloat16, enabled=config.use_amp
     ):
-        loss = model(obs, action)
+        loss = model(obs, action, task)
         info = {"loss": loss.item(), "action_loss": loss.item()}
 
     # Step optimizer

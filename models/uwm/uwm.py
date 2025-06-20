@@ -79,6 +79,24 @@ class DualTimestepEncoder(nn.Module):
         temb2 = self.sinusoidal_pos_emb(t2)
         temb = torch.cat([temb1, temb2], dim=-1)
         return self.proj(temb)
+    
+class TripleTimestepEncoder(nn.Module):
+    def __init__(self, embed_dim: int = 512, mlp_ratio: float = 4.0):
+        super().__init__()
+        self.sinusoidal_pos_emb = SinusoidalPosEmb(embed_dim)
+        hidden_dim = int(embed_dim * mlp_ratio)
+        self.proj = nn.Sequential(
+            nn.Linear(embed_dim * 3, hidden_dim),
+            nn.Mish(),
+            nn.Linear(hidden_dim, embed_dim),
+        )
+
+    def forward(self, t1, t2, t3):
+        temb1 = self.sinusoidal_pos_emb(t1)
+        temb2 = self.sinusoidal_pos_emb(t2)
+        temb3 = self.sinusoidal_pos_emb(t3)
+        temb = torch.cat([temb1, temb2, temb3], dim=-1)
+        return self.proj(temb)
 
 
 class DualNoisePredictionNet(nn.Module):
@@ -218,11 +236,169 @@ class DualNoisePredictionNet(nn.Module):
         return action_noise_pred, obs_noise_pred
 
 
+class TripleNoisePredictionNet(nn.Module):
+    def __init__(
+        self,
+        global_cond_dim: int,
+        image_shape: tuple[int, ...],
+        patch_shape: tuple[int, ...],
+        num_chans: int,
+        num_views: int,
+        action_len: int,
+        action_dim: int,
+        task_dim: int,
+        embed_dim: int = 768,
+        timestep_embed_dim: int = 512,
+        depth: int = 12,
+        num_heads: int = 12,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        num_registers: int = 8,
+    ):
+        super().__init__()
+        # Observation encoder and decoder
+        self.obs_patchifier = MultiViewVideoPatchifier(
+            num_views=num_views,
+            input_shape=image_shape,
+            patch_shape=patch_shape,
+            num_chans=num_chans,
+            embed_dim=embed_dim,
+        )
+        obs_len = self.obs_patchifier.num_patches
+
+        # Action encoder and decoder
+        hidden_dim = int(max(action_dim, embed_dim) * mlp_ratio)
+        self.action_encoder = nn.Sequential(
+            nn.Linear(action_dim, hidden_dim),
+            nn.Mish(),
+            nn.Linear(hidden_dim, embed_dim),
+        )
+        self.action_decoder = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.Mish(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+        # Task encoder and decoder
+        hidden_dim = int(max(task_dim, embed_dim) * mlp_ratio)
+        self.task_encoder = nn.Sequential(
+            nn.Linear(task_dim, hidden_dim),
+            nn.Mish(),
+            nn.Linear(hidden_dim, embed_dim),
+        )
+        self.task_decoder = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.Mish(),
+            nn.Linear(hidden_dim, task_dim),
+        )
+
+        # Timestep embedding
+        self.timestep_embedding = TripleTimestepEncoder(timestep_embed_dim)
+
+        # Registers
+        self.registers = nn.Parameter(
+            torch.empty(1, num_registers, embed_dim).normal_(std=0.02)
+        )
+
+        # Positional embedding
+        total_len = action_len + obs_len + num_registers + 1 # 1 for the task
+        self.pos_embed = nn.Parameter(
+            torch.empty(1, total_len, embed_dim).normal_(std=0.02)
+        )
+
+        # DiT blocks
+        cond_dim = global_cond_dim + timestep_embed_dim
+        self.blocks = nn.ModuleList(
+            [
+                AdaLNAttentionBlock(
+                    dim=embed_dim,
+                    cond_dim=cond_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                )
+                for _ in range(depth)
+            ]
+        )
+        self.head = AdaLNFinalLayer(dim=embed_dim, cond_dim=cond_dim)
+        self.action_inds = (0, action_len)
+        # self.next_obs_inds = (action_len, action_len + obs_len)
+        self.obs_inds = (action_len, action_len + obs_len)
+        self.task_inds = (action_len + obs_len, action_len + obs_len + 1)
+
+        # AdaLN-specific weight initialization
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        # Base initialization
+        self.apply(init_weights)
+
+        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
+        w = self.obs_patchifier.patch_encoder.weight.data
+        nn.init.normal_(w.view([w.shape[0], -1]), mean=0.0, std=0.02)
+        nn.init.constant_(self.obs_patchifier.patch_encoder.bias, 0)
+
+        # Zero-out adaLN modulation layers in DiT blocks:
+        for block in self.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+        # Zero-out output layers:
+        nn.init.constant_(self.head.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.head.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.head.linear.weight, 0)
+        nn.init.constant_(self.head.linear.bias, 0)
+
+    def forward(self, global_cond, action, action_t, obs, obs_t, task, task_t):
+        # Encode inputs
+        action_embed = self.action_encoder(action)
+        obs_embed = self.obs_patchifier(obs)
+        task_embed = self.task_encoder(task)
+
+        # Expand and encode timesteps
+        if len(action_t.shape) == 0:
+            action_t = action_t.expand(action.shape[0]).to(
+                dtype=torch.long, device=action.device
+            )
+        if len(obs_t.shape) == 0:
+            obs_t = obs_t.expand(obs.shape[0]).to(
+                dtype=torch.long, device=obs.device
+            )
+        if len(task_t.shape) == 0:
+            task_t = task_t.expand(task.shape[0]).to(
+                dtype=torch.long, device=task.device
+            )
+        temb = self.timestep_embedding(action_t, obs_t, task_t)
+
+        # Forward through model
+        registers = self.registers.expand(obs.shape[0], -1, -1)
+        x = torch.cat((action_embed, obs_embed, task_embed, registers), dim=1)
+        x = x + self.pos_embed
+        cond = torch.cat((global_cond, temb), dim=-1)
+
+        for block in self.blocks:
+            x = block(x, cond)
+        x = self.head(x, cond)
+
+        # Extract action and observation noise predictions
+        action_noise_pred = x[:, self.action_inds[0] : self.action_inds[1]]
+        obs_noise_pred = x[:, self.obs_inds[0] : self.obs_inds[1]]
+        task_noise_pred = x[:, self.task_inds[0] : self.task_inds[1]]
+
+        # Decode outputs
+        action_noise_pred = self.action_decoder(action_noise_pred)
+        obs_noise_pred = self.obs_patchifier.unpatchify(obs_noise_pred)
+        task_noise_pred = self.task_decoder(task_noise_pred)
+        return action_noise_pred, obs_noise_pred, task_noise_pred
+    
+
 class UnifiedWorldModel(nn.Module):
     def __init__(
         self,
+        state_dim: int,
         action_len: int,
         action_dim: int,
+        task_dim: int,
         obs_encoder: UWMObservationEncoder,
         embed_dim: int = 768,
         timestep_embed_dim: int = 512,
@@ -236,6 +412,7 @@ class UnifiedWorldModel(nn.Module):
         num_inference_steps: int = 10,
         beta_schedule="squaredcos_cap_v2",
         clip_sample=True,
+        batch_size: int=36,
     ):
         """
         Assumes rgb input: (B, T, H, W, C) uint8 image
@@ -251,18 +428,26 @@ class UnifiedWorldModel(nn.Module):
         self.obs_encoder = obs_encoder
         self.latent_img_shape = self.obs_encoder.latent_img_shape()
 
-        # Diffusion noise prediction network
-        # global_cond_dim = self.obs_encoder.feat_dim()
+        # State encoder
+        hidden_dim = int(embed_dim * mlp_ratio)
+        self.state_encoder = nn.Sequential(
+            nn.Linear(state_dim * self.obs_encoder.num_frames, hidden_dim),
+            nn.Mish(),
+            nn.Linear(hidden_dim, embed_dim),
+        )
+        global_cond_dim = embed_dim # num_frames is same as observations
+
         image_shape = self.latent_img_shape[2:]
         num_views, num_chans = self.latent_img_shape[:2]
-        self.noise_pred_net = DualNoisePredictionNet(
-            # global_cond_dim=global_cond_dim,
+        self.noise_pred_net = TripleNoisePredictionNet(
+            global_cond_dim=global_cond_dim,
             image_shape=image_shape,
             patch_shape=latent_patch_shape,
             num_chans=num_chans,
             num_views=num_views,
             action_len=action_len,
             action_dim=action_dim,
+            task_dim=task_dim,
             embed_dim=embed_dim,
             timestep_embed_dim=timestep_embed_dim,
             depth=depth,
@@ -281,8 +466,12 @@ class UnifiedWorldModel(nn.Module):
             clip_sample=clip_sample,
         )
 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.batch_size = batch_size
+        self.task_dim = task_dim
+
     # def forward(self, obs_dict, next_obs_dict, action, action_mask=None):
-    def forward(self, obs_dict, action, action_mask=None):
+    def forward(self, state, obs_dict, action, task, action_mask=None):
         batch_size, device = action.shape[0], action.device
 
         # Encode observations
@@ -291,7 +480,11 @@ class UnifiedWorldModel(nn.Module):
         # )
 
         # obs = self.obs_encoder.encode_curr_obs(obs_dict)
-        obs = self.obs_encoder.encode_next_obs(obs_dict)
+        obs = self.obs_encoder.encode_next_obs(obs_dict) # use this function since the noising process uses a different encoder
+
+        # Encode the proprio
+        state = rearrange(state, "b t d -> b (t d)")
+        state_emb = self.state_encoder(state)
 
         # Sample diffusion timestep for action
         action_noise = torch.randn_like(action)
@@ -311,20 +504,32 @@ class UnifiedWorldModel(nn.Module):
             obs, obs_noise, obs_t
         )
 
-        # Diffusion loss
-        action_noise_pred, obs_noise_pred = self.noise_pred_net(
-            noisy_action, action_t, noisy_obs, obs_t
+        task_noise = torch.randn_like(task)
+        task_t = torch.randint(
+            low=0, high=self.num_train_steps, size=(batch_size,), device=device
+        ).long()
+        noisy_task = self.noise_scheduler.add_noise(
+            task, task_noise, task_t
         )
+
+        # Diffusion loss
+        action_noise_pred, obs_noise_pred, task_noise_pred = self.noise_pred_net(
+            state_emb, noisy_action, action_t, noisy_obs, obs_t, noisy_task, task_t
+        )
+
         action_loss = F.mse_loss(action_noise_pred, action_noise)
         obs_loss = F.mse_loss(obs_noise_pred, obs_noise)
-        loss = action_loss + obs_loss
+        task_loss = F.mse_loss(task_noise_pred, task_noise)
+        loss = action_loss + obs_loss + task_loss
 
         # Logging
         info = {
             "loss": loss.item(),
             "action_loss": action_loss.item(),
             "obs_loss": obs_loss.item(),
+            "task_loss": task_loss.item(),
         }
+        
         return loss, info
 
     @torch.no_grad()
@@ -332,33 +537,30 @@ class UnifiedWorldModel(nn.Module):
         return self.sample_marginal_action(obs_dict)
 
     @torch.no_grad()
-    def sample_marginal_action(self, obs_dict): # p(a)
-        # Initialize action
-        # action_sample = torch.randn(
-        #     (obs_feat.shape[0],) + self.action_shape, device=obs_feat.device
-        # )
-        # obs_sample = torch.randn(
-        #     (obs.shape[0],) + self.latent_img_shape, device=obs.device
-        # )
+    def sample_marginal_action(self, state): # p(a | s)
+        # Encode state
+        state = rearrange(state, "b t d -> b (t d)")
+        state_emb = self.state_encoder(state)
 
-        # TODO: for now just provide as input to get the shape
-        obs = self.obs_encoder.encode_next_obs(obs_dict)
-        obs_feat = self.obs_encoder.encode_curr_obs(obs_dict) 
-
+        # Initialize samples
         action_sample = torch.randn(
-            (obs_feat.shape[0],) + self.action_shape, device=obs_feat.device
+            (self.batch_size,) + self.action_shape, device=self.device
         )
         obs_sample = torch.randn(
-            (obs.shape[0],) + self.latent_img_shape, device=obs.device
+            (self.batch_size,) + self.latent_img_shape, device=self.device
+        )
+        task_sample = torch.randn(
+            (self.batch_size,) + (1, self.task_dim), device=self.device
         )
         
         # Sampling steps
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
         obs_t = self.noise_scheduler.timesteps[-1]
+        task_t = self.noise_scheduler.timesteps[-1]
 
         for action_t in self.noise_scheduler.timesteps:
-            action_noise_pred, _ = self.noise_pred_net(
-                action_sample, action_t, obs_sample, obs_t
+            action_noise_pred, _, _ = self.noise_pred_net(
+                state_emb, action_sample, action_t, obs_sample, obs_t, task_sample, task_t
             )
             action_sample = self.noise_scheduler.step(
                 action_noise_pred, action_t, action_sample
@@ -366,23 +568,57 @@ class UnifiedWorldModel(nn.Module):
         return action_sample
     
 
-    def sample_conditional_action(self, obs_dict): # p(a | o)
+    def sample_obs_conditioned_action(self, state, obs_dict): # p(a | s, o)
+        # Encode state
+        state = rearrange(state, "b t d -> b (t d)")
+        state_emb = self.state_encoder(state)
+
         # Encode observations
         obs = self.obs_encoder.encode_next_obs(obs_dict)
-        obs_feat = self.obs_encoder.encode_curr_obs(obs_dict) # TODO: for now just provide as input to get the shape
 
-        # Initialize action
+        # Initialize samples
         action_sample = torch.randn(
-            (obs_feat.shape[0],) + self.action_shape, device=obs_feat.device
+            (self.batch_size,) + self.action_shape, device=self.device
+        )
+        task_sample = torch.randn(
+            (self.batch_size,) + (1, self.task_dim), device=self.device
         )
 
         # Sampling steps
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
         obs_t = self.noise_scheduler.timesteps[-1]
+        task_t = self.noise_scheduler.timesteps[-1]
 
         for action_t in self.noise_scheduler.timesteps:
-            action_noise_pred, _ = self.noise_pred_net(
-                action_sample, action_t, obs, obs_t
+            action_noise_pred, _, _ = self.noise_pred_net(
+                state_emb, action_sample, action_t, obs, obs_t, task_sample, task_t
+            )
+            action_sample = self.noise_scheduler.step(
+                action_noise_pred, action_t, action_sample
+            ).prev_sample
+        return action_sample
+    
+    def sample_task_conditioned_action(self, state, task): # p(a | s, l)
+        # Encode state
+        state = rearrange(state, "b t d -> b (t d)")
+        state_emb = self.state_encoder(state)
+
+        # Initialize samples
+        obs_sample = torch.randn(
+            (self.batch_size,) + self.latent_img_shape, device=self.device
+        )
+        action_sample = torch.randn(
+            (self.batch_size,) + self.action_shape, device=self.device
+        )
+
+        # Sampling steps
+        self.noise_scheduler.set_timesteps(self.num_inference_steps)
+        obs_t = self.noise_scheduler.timesteps[-1]
+        task_t = self.noise_scheduler.timesteps[-1]
+
+        for action_t in self.noise_scheduler.timesteps:
+            action_noise_pred, _, _ = self.noise_pred_net(
+                state_emb, action_sample, action_t, obs_sample, obs_t, task, task_t
             )
             action_sample = self.noise_scheduler.step(
                 action_noise_pred, action_t, action_sample
@@ -391,21 +627,27 @@ class UnifiedWorldModel(nn.Module):
 
 
     @torch.no_grad()
-    def sample_joint(self, obs_dict): # p(o, a)
-        obs_feat = self.obs_encoder.encode_curr_obs(obs_dict) # TODO: for now just provide as input to get the shape
-        # Initialize action and next_obs
+    def sample_joint(self, state): # p(o, a, l | s)
+        # Encode state
+        state = rearrange(state, "b t d -> b (t d)")
+        state_emb = self.state_encoder(state)
+
+        # Initialize samples
         action_sample = torch.randn(
-            (obs_feat.shape[0],) + self.action_shape, device=obs_feat.device
+            (self.batch_size,) + self.action_shape, device=self.device
         )
         obs_sample = torch.randn(
-            (obs_feat.shape[0],) + self.latent_img_shape, device=obs_feat.device
+            (self.batch_size,) + self.latent_img_shape, device=self.device
+        )
+        task_sample = torch.randn(
+            (self.batch_size,) + (1, self.task_dim), device=self.device
         )
 
         # Sampling steps
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
         for t in self.noise_scheduler.timesteps:
-            action_noise_pred, obs_noise_pred = self.noise_pred_net(
-                action_sample, t, obs_sample, t
+            action_noise_pred, obs_noise_pred, task_noise_pred = self.noise_pred_net(
+                state_emb, action_sample, t, obs_sample, t, task_sample, t
             )
             obs_sample = self.noise_scheduler.step(
                 obs_noise_pred, t, obs_sample
@@ -413,7 +655,39 @@ class UnifiedWorldModel(nn.Module):
             action_sample = self.noise_scheduler.step(
                 action_noise_pred, t, action_sample
             ).prev_sample
-        return obs_sample, action_sample
+            task_sample = self.noise_scheduler.step(
+                task_noise_pred, t, task_sample
+            ).prev_sample
+        return obs_sample, action_sample, task_sample
+    
+    def sample_policy(self, state, obs_dict, task): # p(a | s, o, l)
+        # Sample action from the policy given state, observation and task.
+        
+        # Encode state
+        state = rearrange(state, "b t d -> b (t d)")
+        state_emb = self.state_encoder(state)
+
+        # Encode observations
+        obs = self.obs_encoder.encode_next_obs(obs_dict)
+
+        # Initialize action
+        action_sample = torch.randn(
+            (self.batch_size,) + self.action_shape, device=self.device
+        )
+
+        # Sampling steps
+        self.noise_scheduler.set_timesteps(self.num_inference_steps)
+        obs_t = self.noise_scheduler.timesteps[-1]
+        task_t = self.noise_scheduler.timesteps[-1]
+
+        for action_t in self.noise_scheduler.timesteps:
+            action_noise_pred, _, _ = self.noise_pred_net(
+                state_emb, action_sample, action_t, obs, obs_t, task, task_t
+            )
+            action_sample = self.noise_scheduler.step(
+                action_noise_pred, action_t, action_sample
+            ).prev_sample
+        return action_sample
 
 
     # @torch.no_grad()

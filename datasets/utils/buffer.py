@@ -2,7 +2,7 @@ import math
 import os
 from multiprocessing import Lock
 from os.path import expanduser, expandvars
-from typing import Union, Optional
+from typing import Optional, Union
 
 import numcodecs
 import numpy as np

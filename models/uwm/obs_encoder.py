@@ -68,6 +68,10 @@ class UWMObservationEncoder(nn.Module):
             CLIPTextEncoder(embed_dim=embed_dim) if use_language else None
         )
 
+        # If we preprocessed the language embeddings, we need a head to project them to the embed_dim
+        # self.use_language_embs = use_language_embs
+        # self.lang_emb_head = nn.Linear(512, embed_dim) if use_language_embs else None
+
         # VAE downsampling
         self.vae = VAEDownsample()
 
@@ -141,7 +145,7 @@ class UWMObservationEncoder(nn.Module):
             chunk_sizes = [img.shape[0] for img in imgs_list]
             transformed_imgs = list(transformed_imgs.split(chunk_sizes, dim=0))
         return transformed_imgs
-
+        
     def encode_curr_obs(self, curr_obs_dict: dict):
         # Encoder current observations to features
         curr_imgs = self.apply_transform(curr_obs_dict)
@@ -158,6 +162,7 @@ class UWMObservationEncoder(nn.Module):
                 attention_mask=curr_obs_dict["attention_mask"],
             )
             curr_feats = torch.cat([curr_feats, lang_feats], dim=-1)
+
         return curr_feats
 
     def encode_next_obs(self, next_obs_dict: dict):

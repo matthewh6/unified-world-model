@@ -41,7 +41,9 @@ class RobomimicDataset(Dataset):
                 self._lowdim_shapes[key] = obs_shape
             else:
                 raise RuntimeError(f"Unsupported obs type: {obs_type}")
+        self._robot_states_shape = tuple(shape_meta["robot_states"]["shape"])
         self._action_shape = tuple(shape_meta["action"]["shape"])
+        self._task_emb_shape = tuple(shape_meta["task_emb"]["shape"])
 
         # Compressed buffer to store episode data
         self.buffer = self._init_buffer(hdf5_path_globs, buffer_path)
@@ -77,14 +79,15 @@ class RobomimicDataset(Dataset):
 
     def _init_buffer(self, hdf5_path_globs, buffer_path):
         hdf5_paths = glob_all(hdf5_path_globs)
-
         # Create metadata
         metadata = {}
         for key, shape in self._image_shapes.items():
             metadata[f"obs.{key}"] = {"shape": shape, "dtype": np.uint8}
         for key, shape in self._lowdim_shapes.items():
             metadata[f"obs.{key}"] = {"shape": shape, "dtype": np.float32}
+        metadata["robot_states"] = {"shape": self._robot_states_shape, "dtype": np.float32}
         metadata["action"] = {"shape": self._action_shape, "dtype": np.float32}
+        metadata["task_emb"] = {"shape": self._task_emb_shape, "dtype": np.float32}
 
         # Compute buffer capacity
         capacity = 0
@@ -123,7 +126,10 @@ class RobomimicDataset(Dataset):
                             episode[f"obs.{key}"] = demo["obs"][key][:]
                     for key in self._lowdim_shapes.keys():
                         episode[f"obs.{key}"] = demo["obs"][key][:]
+                    episode["robot_states"] = demo["robot_states"][:]
                     episode["action"] = demo["actions"][:]
+                    episode["task_emb"] = demo["task_emb"][:]
+
                     buffer.add_episode(episode)
                     pbar.update(1)
         pbar.close()
